@@ -4,3 +4,11 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+class CorrectionStatus(StrEnum):
+    APPLIED = "applied"
+    REJECTED = "rejected"
+class NoteStatus(StrEnum):
+    SUBMITTED = "submitted"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    SUPERSEDED = "superseded"

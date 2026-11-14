@@ -9,3 +9,4 @@ class SpecimenOutput(BaseModel):
     duration_hours:float
     event_observed:bool
     note:str
+    revision_no:int

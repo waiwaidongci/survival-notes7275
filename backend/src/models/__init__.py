@@ -3,5 +3,7 @@ from .audit import Audit
 from .cohort import TestCohort
 from .specimen import Specimen
 from .followup import FollowupEvent
+from .followup_revision import FollowupRevision
+from .followup_correction import FollowupCorrection
 from .survival_run import SurvivalRun
 from .maintenance_note import MaintenanceNote

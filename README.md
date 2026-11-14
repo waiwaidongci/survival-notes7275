@@ -8,8 +8,8 @@
 
 | 角色 | 页面与权限 | 典型动作 |
 |---|---|---|
-| admin / 材料负责人 | 六页读写、创建研究/建议、补备注、确认或退回 | 确认研究底稿适用范围 |
-| analyst / 耐久研究员 | 六页阅读，创建研究/建议，补随访备注；不能确认 | 解释删失、在险表和比较结果 |
+| admin / 材料负责人 | 六页读写、创建研究/建议、整批更正、确认或退回 | 确认研究底稿适用范围 |
+| analyst / 耐久研究员 | 六页阅读，创建研究/建议，补随访备注、提交整批更正；不能确认 | 解释删失、在险表和比较结果 |
 | viewer / 维护阅读者 | 六页只读，获批研究才能导出 | 查阅确认档案与CSV |
 
 所有角色导出都必须有对应研究的获批建议。确认意味着研究证据允许归档，不是对灯带寿命或维护安全的保证。
@@ -49,6 +49,18 @@ seed按用户邮箱、批次code、试件code、随访specimen_id和基准研究
 8. 阮青以admin确认或退回，并记录适用范围；重复确认409拒绝。
 9. 林舟以viewer打开确认档案、导出KM表与SHA256，不能创建或审批。
 
+## 终态误记与整批更正
+
+终态时长或失效状态误记时，不再只能补备注：在“试件与随访”页提交**整批更正**，系统以修订号保证可追溯、可重算。
+
+- **按试件修订号提交**：每行含试件编号、该试件当前修订号（列表可见）、更正后的时长和/或失效状态。原始终态为修订号1，每批生效的更正把涉及试件推进到新修订号（取更正批次id，全局唯一）。
+- **重复与乱序**：同一试件在一批内出现多次（无论同值异值）一律整批拒绝；期望修订号与当前不一致（乱序/过期提交）整批拒绝；同号异值、未知编号、非法时长、无实质变化同样拒绝。**整批原子性**：任何一行不合法，全批不生效，拒绝批次本身也入台账，可在页面核对拒绝原因。
+- **生效即重算**：合法批次在一个事务内更新终态、写不可变修订历史（`FollowupRevision`），并仅让引用了受影响批次的研究进入重算队列；不相关研究不动。受影响研究的目标修订号（`target_revision`）更新，旧结果保留但标记为落后。
+- **导出暂停与重新确认**：受影响研究的所有待确认/已确认维护建议自动置为`superseded`（历史保留、可追查），获批导出立即暂停；worker按新修订重算完成后，需重新提交并由负责人确认，导出才恢复。
+- **晚到不覆盖**：队列消息携带目标修订号，worker写回结果前再次比对；计算期间若有更新的更正，旧计算结果直接丢弃，绝不覆盖新结论，相关审计为`survival.job_stale`/`survival.result_stale`。
+- **中断可恢复**：worker启动时把所有`queued/running`研究按当前目标修订号重新入队；归档文件命名为`run-{id}-rev{修订号}.json`（同时更新同名latest），研究曲线、归档JSON与导出CSV始终对应同一修订，结果内含`data_revision`与该修订的输入SHA256。
+- **历史可追查**：每个试件的修订历史（原始观察+每次更正的来源、执行者、时间、时长/状态）可按编号查询；更正台账（含被拒批次）、失效建议与全部审计在页面可核对。备注仍可自由补充，但不产生新修订号、不触发重算。
+
 ## 算法口径
 
 - **Kaplan–Meier**：每个唯一观察时点的风险集`n_i=count(duration>=t_i)`；事件数d_i、删失c_i。按`S(t)=Π(1-d_i/n_i)`递推，事件和删失同时发生时都先在风险集中。删失只减少后续风险集，不使曲线下降。
@@ -57,13 +69,13 @@ seed按用户邮箱、批次code、试件code、随访specimen_id和基准研究
 - **双侧log-rank**：汇总两组所有事件时点，`E_A=d*n_A/n`，`V=d*(n_A/n)*(n_B/n)*(n-d)/(n-1)`（n≤1则V=0），`χ²=(ΣO_A-ΣE_A)²/ΣV`，自由度1，p=`erfc(sqrt(χ²/2))`。并列事件的有限总体校正保留。无事件或ΣV≈0时`estimable=false`、χ²/p=null，不给伪显著性。
 - 前提为独立试件、非信息性右删失；没有延迟入组、左/区间删失、重复事件、竞争风险或协变量调整。log-rank在比例风险差异下较敏感，交叉曲线可能检出力低；结果只作关联解释。
 - 失败态：每组少于2件、时长≤0/非有限/>1e6小时、事件非布尔、重复试件、相同批次、置信水平越界明确拒绝。全删失是合法研究：平坦曲线、中位未达到、log-rank不可估；不是失败或无限寿命证明。
-- 输入SHA256按试件code稳定排序，覆盖两组批次标识/工艺、所有试件字段、随访时长/状态/备注、置信水平、小时单位、在险时点与方法版本。保存结果含完整曲线、区间与事件风险集表，运行的参数保留在数据库。
+- 输入SHA256按试件code稳定排序，覆盖数据修订号、两组批次标识/工艺、所有试件字段、随访时长/状态/备注、置信水平、小时单位、在险时点与方法版本。保存结果含完整曲线、区间与事件风险集表，运行的参数保留在数据库。
 
 官方参考：[SciPy ECDF与右删失KM](https://docs.scipy.org/doc/scipy-1.15.1/reference/generated/scipy.stats.ecdf.html)、[Greenwood区间](https://docs.scipy.org/doc/scipy-1.15.1/reference/generated/scipy.stats._result_classes.EmpiricalDistributionFunction.confidence_interval.html)、[log-rank口径](https://docs.scipy.org/doc/scipy-1.15.1/reference/generated/scipy.stats.logrank.html)。计算实现在本项目标准库算法中；SciPy1.15.1另作独立测试oracle，未用测试数值硬编码结果。
 
 ## 页面与工程
 
-六页为研究总览、试件与随访、比较配置、耐久结果、维护建议、研究留痕。TestCohort/Specimen/FollowupEvent/SurvivalRun/MaintenanceNote五实体贯穿模型、schema、service、route、前端API、Pinia store与页面。User/Audit为横切实体。
+六页为研究总览、试件与随访、比较配置、耐久结果、维护建议、研究留痕。TestCohort/Specimen/FollowupEvent/FollowupRevision/FollowupCorrection/SurvivalRun/MaintenanceNote七实体贯穿模型、schema、service、route、前端API、Pinia store与页面。User/Audit为横切实体。
 
 | 部分 | 技术 |
 |---|---|
@@ -80,7 +92,7 @@ backend/migrations/001_initial.sql
 frontend/src/{api,stores,types,components,hooks,pages,router,utils,constants}
 ```
 
-RunSummary/SurvivalPlot跨首页、结果和建议页复用，CohortSelector在来源/配置共用，RiskTable封装风险口径；另有DataTable/StatusBadge/Notice、useAction/useResearchData。角色枚举`backend/src/constants/roles.py`、运行枚举`status.py`，对应`frontend/src/constants/enums.ts`，路由/worker真实使用。JWT8小时，PBKDF2-SHA256，权限每次查数据库。审计覆盖登录、随访备注、任务、建议和确认；全局错误与登录限流为两个独立中间件。
+RunSummary/SurvivalPlot跨首页、结果和建议页复用，CohortSelector在来源/配置共用，RiskTable封装风险口径；另有DataTable/StatusBadge/Notice、useAction/useResearchData。角色枚举`backend/src/constants/roles.py`、运行枚举`status.py`，对应`frontend/src/constants/enums.ts`，路由/worker真实使用。JWT8小时，PBKDF2-SHA256，权限每次查数据库。审计覆盖登录、随访备注、整批更正（生效/拒绝）、研究失效重算、晚到任务丢弃、建议和确认；全局错误与登录限流为两个独立中间件。
 
 ## 配置与本地开发
 
@@ -103,7 +115,7 @@ docker compose down -v --remove-orphans
 
 ## 已知边界
 
-合成冻结数据，无仪器/文件上传；仅允许补随访备注，不编辑终态时长/状态。单worker无running自动恢复、事务outbox、多实例锁；中断任务需重提。登录限流仅进程内。未给中位置信区间、RMST、风险比或比例风险检验，不自动推荐更换时间。ORM metadata初建表不等于完整迁移链；字体依赖网络，离线回退。
+合成冻结数据，无仪器/文件上传；终态误记通过整批更正与修订号留痕处理，不允许绕过批次直接改写。单worker具备running任务启动恢复与修订号防覆盖，但无事务outbox、多实例分布式锁；队列不可用时受影响任务需等待worker恢复。登录限流仅进程内。未给中位置信区间、RMST、风险比或比例风险检验，不自动推荐更换时间。ORM metadata初建表不等于完整迁移链（修订体系见`migrations/002_followup_revisions.sql`）；字体依赖网络，离线回退。
 
 ## License
 

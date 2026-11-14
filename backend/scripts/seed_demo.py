@@ -1,9 +1,18 @@
-import json,random
+import json,random,os
+from pathlib import Path
 from src.config.database import Base,engine,SessionLocal
-from src.models import User,TestCohort,Specimen,FollowupEvent,SurvivalRun,MaintenanceNote
+from src.models import User,TestCohort,Specimen,FollowupEvent,FollowupRevision,SurvivalRun,MaintenanceNote
 from src.utils.security import hash_password
 from src.services.specimen_service import specimen_rows
 from src.services.survival_algorithm import analyze_survival
+
+ARTIFACTS=Path(os.environ.get("ARTIFACT_DIR","/artifacts"))
+def archive_baseline(run):
+    ARTIFACTS.mkdir(exist_ok=True)
+    payload={"run_id":run.id,"run_name":run.name,"target_revision":0,"result_revision":0,
+             "input_hash":run.result.get("input_hash"),"result":run.result}
+    (ARTIFACTS/f"run-{run.id}-rev0.json").write_text(json.dumps(payload,ensure_ascii=False,allow_nan=False))
+    (ARTIFACTS/f"run-{run.id}.json").write_text(json.dumps(payload,ensure_ascii=False,allow_nan=False))
 
 def seed():
     Base.metadata.create_all(engine)
@@ -20,13 +29,19 @@ def seed():
             rng=random.Random(seed_value)
             for i in range(1,181):
                 key=f"{code}-{i:04}";lifetime=rng.weibullvariate(scale,1.8);censor=rng.uniform(900,1450);observed=lifetime<=censor;duration=max(25.,round(min(lifetime,censor)/25)*25.)
+                note_text="观察到光通量降至阈值，记为耐久事件。" if observed else "试验观察截止，灯带仍工作，记为右删失。"
                 s=db.query(Specimen).filter_by(code=key).first()
                 if not s:s=Specimen(code=key,cohort_id=c.id,material="24V展陈柔性灯带 · 500mm",enrolled_at="2026-08-01T00:00:00+00:00");db.add(s);db.flush()
-                if not db.query(FollowupEvent).filter_by(specimen_id=s.id).first():db.add(FollowupEvent(specimen_id=s.id,duration_hours=duration,event_observed=observed,note="观察到光通量降至阈值，记为耐久事件。" if observed else "试验观察截止，灯带仍工作，记为右删失。"))
+                event=db.query(FollowupEvent).filter_by(specimen_id=s.id).first()
+                if not event:
+                    event=FollowupEvent(specimen_id=s.id,duration_hours=duration,event_observed=observed,note=note_text,revision_no=1)
+                    db.add(event);db.flush()
+                    db.add(FollowupRevision(specimen_id=s.id,revision_no=1,duration_hours=duration,event_observed=observed,note=note_text,source="seed",owner="system"))
             db.flush();cohorts.append(c)
         if not db.query(SurvivalRun).filter_by(name="两批封装耐久 · 基准比较").first():
-            a,b=cohorts;result=analyze_survival(a,b,specimen_rows(db,a.id),specimen_rows(db,b.id),.95)
-            run=SurvivalRun(name="两批封装耐久 · 基准比较",cohort_a_id=a.id,cohort_b_id=b.id,confidence=.95,status="completed",result=result,owner="江栩 · 耐久研究员");db.add(run);db.flush()
-            db.add(MaintenanceNote(run_id=run.id,title="基准维护观察说明",interpretation="已分开事件和删失，比较结果只反映当前试验条件，不作工艺因果保证。",recommendation="优先保留尾部在险样本观察，结合环境应力记录讨论维护窗口。",status="approved",owner="江栩 · 耐久研究员",reviewer="阮青 · 材料负责人",review_note="批准研究底稿归档；维护周期仍需现场条件复核。",reviewed_at="2026-11-01T00:00:00+00:00"))
-        db.commit();print(json.dumps({m.__tablename__:db.query(m).count() for m in [User,TestCohort,Specimen,FollowupEvent,SurvivalRun,MaintenanceNote]},ensure_ascii=False))
+            a,b=cohorts;result=analyze_survival(a,b,specimen_rows(db,a.id),specimen_rows(db,b.id),.95,0)
+            run=SurvivalRun(name="两批封装耐久 · 基准比较",cohort_a_id=a.id,cohort_b_id=b.id,confidence=.95,status="completed",result=result,owner="江栩 · 耐久研究员",target_revision=0,result_revision=0);db.add(run);db.flush()
+            db.add(MaintenanceNote(run_id=run.id,title="基准维护观察说明",interpretation="已分开事件和删失，比较结果只反映当前试验条件，不作工艺因果保证。",recommendation="优先保留尾部在险样本观察，结合环境应力记录讨论维护窗口。",status="approved",owner="江栩 · 耐久研究员",reviewer="阮青 · 材料负责人",review_note="批准研究底稿归档；维护周期仍需现场条件复核。",reviewed_at="2026-11-01T00:00:00+00:00",run_revision_no=0))
+            archive_baseline(run)
+        db.commit();print(json.dumps({m.__tablename__:db.query(m).count() for m in [User,TestCohort,Specimen,FollowupEvent,FollowupRevision,SurvivalRun,MaintenanceNote]},ensure_ascii=False))
 if __name__=="__main__":seed()
